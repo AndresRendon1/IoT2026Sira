@@ -39,6 +39,7 @@ typedef struct {
     const char* temp_estado;
     float lux;
     const char* lux_estado;
+    bool valvulas_on;
 } sensor_data_t;
 
 static sensor_data_t g_sensor_data;
@@ -213,12 +214,21 @@ void valvula_init(void) {
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf);
-    gpio_set_level(VALVULA1_GPIO, VALVULA_ON_LEVEL);
-    gpio_set_level(VALVULA2_GPIO, VALVULA_ON_LEVEL);
+    gpio_set_level(VALVULA1_GPIO, VALVULA_OFF_LEVEL);
+    gpio_set_level(VALVULA2_GPIO, VALVULA_OFF_LEVEL);
 }
 
 static inline void valvula_set(uint32_t gpio_num, bool on) {
     gpio_set_level(gpio_num, on ? VALVULA_ON_LEVEL : VALVULA_OFF_LEVEL);
+}
+
+static inline bool valvula_debe_activar(uint32_t hum_mv, uint8_t nivel_pct, float temp_c, float lux) {
+    bool sueloSeco = hum_mv <= HUMEDAD_SECO_MAX;
+    bool nivelSuficiente = nivel_pct >= 20;
+    bool temperaturaSegura = (temp_c >= 10.0f && temp_c <= 40.0f);
+    bool luzAdecuada = (lux >= 50.0f);
+
+    return sueloSeco && nivelSuficiente && temperaturaSegura && luzAdecuada;
 }
 
 static void sensor_task(void *arg) {
@@ -233,6 +243,10 @@ static void sensor_task(void *arg) {
         const char* temp_estado = temperatura_estado(temperatura);
         float lux = bh1750_read();
         const char* lux_estado = (lux >= 0) ? luz_estado(lux) : "error de lectura";
+
+        bool activar_valvulas = valvula_debe_activar(hum_mv, nivel_pct, temperatura, lux);
+        valvula_set(VALVULA1_GPIO, activar_valvulas);
+        valvula_set(VALVULA2_GPIO, activar_valvulas);
 
         if (xSemaphoreTake(g_sensor_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
             g_sensor_data.hum_mv = hum_mv;
@@ -271,6 +285,7 @@ static void report_task(void *arg) {
             printf("Luz: %.2f lux (%s)\n", local_data.lux, local_data.lux_estado);
         }
 
+        printf("Valvulas: %s\n", local_data.valvulas_on ? "ON" : "OFF");
         printf("----------------------\n");
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -295,7 +310,8 @@ void app_main(void) {
         .hum_estado = "esperando lectura",
         .temp_estado = "esperando lectura",
         .lux = -1.0f,
-        .lux_estado = "esperando lectura"
+        .lux_estado = "esperando lectura",
+        .valvulas_on = false
     };
 
     adc_init();
@@ -311,10 +327,6 @@ void app_main(void) {
     if (err != ESP_OK) {
         printf("BH1750 init failed: %d\n", err);
     }
-
-    // Mantener ambas electroválvulas activas al iniciar
-    valvula_set(VALVULA1_GPIO, true);
-    valvula_set(VALVULA2_GPIO, true);
 
     xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
     xTaskCreate(report_task, "report_task", 4096, NULL, 5, NULL);
